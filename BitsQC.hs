@@ -14,6 +14,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 
 import Control.Applicative
+import Control.Monad (replicateM)
 import Data.Bits
 import Data.Word
 import Foreign.Storable
@@ -50,6 +51,13 @@ tests =
       , testProperty "prop_isEmptyOfNonEmptyEmpty" prop_isEmptyOfNonEmptyEmpty
       , testProperty "prop_isEmptyOfConsumedEmpty" prop_isEmptyOfConsumedEmpty
       , testProperty "prop_isEmptyOfNotConsumedNotEmpty" prop_isEmptyOfNotConsumedNotEmpty
+      ]
+
+  , testGroup "Alternative"
+      [
+        testProperty "isManyZeroOrMore" prop_isManyZeroOrMore
+      , testProperty "isSomeOneOrMore" prop_isSomeOneOrMore
+      , testProperty "isEmptyIdentity" prop_isEmptyIdentity
       ]
 
   , testGroup "Fail"
@@ -135,6 +143,35 @@ prop_isEmptyOfConsumedEmpty bs =
   not (L.null bs) ==>
     runGet (runBitGet (getByteString n >> isEmpty)) bs
     where n = fromIntegral $ L.length bs
+
+prop_isManyZeroOrMore :: L.ByteString -> Property
+prop_isManyZeroOrMore bs  =
+  let f = getWord8 7
+      n = 8 * (fromIntegral $ L.length bs) `div` 7
+  in
+    L.length bs <= (fromIntegral $ (maxBound :: Int)) ==>
+      let m  = runGet (runBitGet $ many f) bs
+          m' = runGet (runBitGet (replicateM n (getWord8 7))) bs
+      in m == m'
+
+prop_isEmptyIdentity :: Word8 -> Bool
+prop_isEmptyIdentity w =
+  let bs = L.singleton w in
+    runGet (runBitGet (getWord16be 10 <|> getWord16be 7)) bs ==
+    runGet (runBitGet (getWord16be 7)) bs
+                &&
+    runGet (runBitGet (getWord16be 7 <|> getWord16be 10)) bs ==
+    runGet (runBitGet (getWord16be 7)) bs
+
+prop_isSomeOneOrMore :: L.ByteString -> Property
+prop_isSomeOneOrMore bs  =
+  let f = getWord8 7
+      n = 8 * (fromIntegral $ L.length bs) `div` 7
+  in
+    not (L.null bs) && (L.length bs <= (fromIntegral $ (maxBound :: Int))) ==>
+      let m  = runGet (runBitGet $ some f) bs
+          m' = runGet (runBitGet (replicateM n (getWord8 7))) bs
+      in m == m' && length m >= 1
 
 prop_isEmptyOfNotConsumedNotEmpty :: L.ByteString -> Int -> Property
 prop_isEmptyOfNotConsumedNotEmpty bs n =

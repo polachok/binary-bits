@@ -150,6 +150,9 @@ import GHC.Word
 
 data S = S {-# UNPACK #-} !ByteString -- Input
            {-# UNPACK #-} !Int -- Bit offset (0-7)
+       | E !String
+           {-# UNPACK #-} !ByteString -- Input
+           {-# UNPACK #-} !Int -- Bit offset (0-7)
           deriving (Show)
 
 -- | A block that will be read with only one boundry check. Needs to know the
@@ -173,8 +176,12 @@ block :: Block a -> BitGet a
 block (Block i p) = do
   ensureBits i
   s <- getState
-  putState $! (incS i s)
-  return $! p s
+  case s of
+    (S bs o) -> do
+      putState $! (incS i s)
+      return $! p s
+    (E _ _ _) ->
+      Control.Applicative.empty
 
 incS :: Int -> S -> S
 incS o (S bs n) =
@@ -200,10 +207,12 @@ byte_offset :: Int -> Int
 byte_offset n = n `shiftR` 3
 
 readBool :: S -> Bool
+readBool (E _ _ _) = error "impossible"
 readBool (S bs n) = testBit (unsafeHead bs) (7-n)
 
 {-# INLINE readWord8 #-}
 readWord8 :: Int -> S -> Word8
+readWord8 _ (E _ _ _) = error "impossible"
 readWord8 n (S bs o)
   -- no bits at all, return 0
   | n == 0 = 0
@@ -225,6 +234,7 @@ readWord8 n (S bs o)
 
 {-# INLINE readWord16be #-}
 readWord16be :: Int -> S -> Word16
+readWord16be _   (E _ _ _) = error "impossible"
 readWord16be n s@(S bs o)
 
   -- 8 or fewer bits, use readWord8
@@ -251,6 +261,7 @@ readWord16be n s@(S bs o)
 
 {-# INLINE readWord32be #-}
 readWord32be :: Int -> S -> Word32
+readWord32be _   (E _ _ _) = error "impossible"
 readWord32be n s@(S _ o)
   -- 8 or fewer bits, use readWord8
   | n <= 8 = fromIntegral (readWord8 n s)
@@ -267,6 +278,7 @@ readWord32be n s@(S _ o)
 
 {-# INLINE readWord64be #-}
 readWord64be :: Int -> S -> Word64
+readWord64be _   (E _ _ _) = error "impossible"
 readWord64be n s@(S _ o)
   -- 8 or fewer bits, use readWord8
   | n <= 8 = fromIntegral (readWord8 n s)
@@ -282,6 +294,7 @@ readWord64be n s@(S _ o)
 
 
 readByteString :: Int -> S -> ByteString
+readByteString _   (E _ _ _) = error "impossible"
 readByteString n s@(S bs o)
   -- no offset, easy.
   | o == 0 = unsafeTake n bs
@@ -290,6 +303,7 @@ readByteString n s@(S bs o)
 
 readWithoutOffset :: (Bits a, Num a)
                   => S -> (a -> Int -> a) -> (a -> Int -> a) -> Int -> a
+readWithoutOffset (E _ _ _) _ _ _ = error "impossible"
 readWithoutOffset (S bs o) shifterL shifterR n
   | o /= 0 = error "readWithoutOffset: there is an offset"
 
@@ -315,6 +329,7 @@ readWithoutOffset (S bs o) shifterL shifterR n
 
 readWithOffset :: (Bits a, Num a)
          => S -> (a -> Int -> a) -> (a -> Int -> a) -> Int -> a
+readWithOffset (E _ _ _) _ _ _ = error "impossible"
 readWithOffset (S bs o) shifterL shifterR n
   | n <= 64 = let bits_in_msb = 8 - o
                   (n',top) = (n - bits_in_msb
@@ -342,9 +357,15 @@ newtype BitGet a = B { runState :: S -> Get (S,a) }
 
 instance Monad BitGet where
   return x = B $ \s -> return (s,x)
-  fail str = B $ \(S inp n) -> putBackState inp n >> fail str
-  (B f) >>= g = B $ \s -> do (s',a) <- f s
-                             runState (g a) s'
+  fail str = B $ \s -> case s of
+            (S inp n) -> putBackState inp n >> fail str
+            (E _ inp n) -> putBackState inp n >> fail str
+  (B f) >>= g = let withState s@(E _ _ _) _ =
+                       return (s, error "BitGet (bind): should not happen")
+                    withState s@(S _ _) f = f s
+                in
+                  B $ \s -> do (s',a) <- withState s f
+                               withState s' (runState (g a))
 
 instance Functor BitGet where
   fmap f m = m >>= \a -> return (f a)
@@ -352,6 +373,24 @@ instance Functor BitGet where
 instance Applicative BitGet where
   pure x = return x
   fm <*> m = fm >>= \f -> m >>= \v -> return (f v)
+
+instance Alternative BitGet where
+  empty = B $ \s -> do
+    let (inp, n) = case s of
+         (S inp n) -> (inp, n)
+         (E _ inp n) -> (inp, n)
+    return (E "Data.Binary.GetBits(Alternative).empty" inp n, error "empty value")
+  (B f) <|> (B g) = B $ \s -> do
+                              (s', v) <- f s
+                              case s' of
+                                   (S _ _) -> return (s', v)
+                                   (E _ _ _) -> g s
+  some p = (:) <$> p <*> many p
+  many p = do
+    v <- (Just <$> p) <|> pure Nothing
+    case v of
+      Nothing -> pure []
+      Just x -> (:) x <$> many p
 
 -- | Run a 'BitGet' within the Binary packages 'Get' monad. If a byte has
 -- been partially consumed it will be discarded once 'runBitGet' is finished.
@@ -382,15 +421,21 @@ putState s = B $ \_ -> return (s,())
 -- | Make sure there are at least @n@ bits.
 ensureBits :: Int -> BitGet ()
 ensureBits n = do
-  (S bs o) <- getState
-  if n <= (B.length bs * 8 - o)
-    then return ()
-    else do let currentBits = B.length bs * 8 - o
-            let byteCount = (n - currentBits + 7) `div` 8
-            B $ \_ -> do B.ensureN byteCount
-                         bs' <- B.get
-                         put B.empty
-                         return (S (bs`append`bs') o, ())
+  s <- getState
+  case s of
+    (E _ _ _) -> Control.Applicative.empty
+    (S bs o) ->
+      if n <= (B.length bs * 8 - o)
+        then return ()
+        else do let currentBits = B.length bs * 8 - o
+                let byteCount = (n - currentBits + 7) `div` 8
+                B $ \_ ->
+                  (do B.ensureN byteCount
+                      bs' <- B.get
+                      put B.empty
+                      return (S (bs`append`bs') o, ())) <|>
+                       return (E "no bytes left" bs o, ())
+
 
 -- | Get 1 bit as a 'Bool'.
 getBool :: BitGet Bool
