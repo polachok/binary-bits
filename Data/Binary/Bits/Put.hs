@@ -59,13 +59,14 @@ putWord8 n w = BitPut $ \s -> PairS () $
                 -- a whole word8, no offset
     (S b t o) | n == 8 && o == 0 -> flush $ S b w n
                 -- less than a word8, will fit in the current word8
-              | n <= 8 - o       -> flush $ S b (t .|. (w `shiftL` (8 - n - o))) (o+n)
+              | n < 8 - o  -> flush $ S b (t .|. (w `shiftL` (8 - n - o))) (o+n)
                 -- will finish this word8, and spill into the next one
-              | otherwise -> flush $
+              | otherwise  -> flush $
                               let o' = o + n - 8
-                                  w' = t .|. (w `shiftR` o')
+                                  w' = w `shiftL` (8 - n) `shiftR` (8 - n)
+                                  b' = t .|. (w' `shiftR` o')
                                   t' = w `shiftL` (8 - o')
-                              in S (b `mappend` B.singleton w') t' o'
+                              in S (b `mappend` B.singleton b') t' o'
 
 -- | Put the @n@ lower bits of a 'Word16'.
 putWord16be :: Int -> Word16 -> BitPut ()
