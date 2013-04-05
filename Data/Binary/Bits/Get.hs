@@ -165,6 +165,10 @@ instance Applicative Block where
   (Block i _)  *> (Block j q) = Block (i+j) (q . incS i)
   (Block i p) <*  (Block j _) = Block (i+j) p
 
+instance Alternative BitGet where
+  empty = fail "Data.Binary.Bits.Get.empty"
+  a <|> b = B $ \s -> runState a s <|> runState b s
+
 -- | Get a block. Will be read with one single boundry check, and
 -- therefore requires a statically known number of bits.
 -- Build blocks using 'bool', 'word8', 'word16be', 'word32be', 'word64be',
